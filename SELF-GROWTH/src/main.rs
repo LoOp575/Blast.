@@ -1,117 +1,100 @@
 use std::ffi::c_int;
-use std::process;
 use std::thread;
 use std::time::Duration;
 
-use sysinfo::{Disks, System};
+use sysinfo::Disks;
 
 extern "C" {
-    fn recursive_step(x: u64, result: *mut u64) -> c_int;
+    fn growth_add(current: u64, disk_total: u64, result: *mut u64) -> c_int;
 }
 
-struct GrowthValue {
-    name: &'static str,
-    value: u64,
-    active: bool,
-}
-
-impl GrowthValue {
-    fn new(name: &'static str, initial: u64) -> Self {
-        Self {
-            name,
-            value: initial,
-            active: true,
-        }
-    }
-
-    fn calculate(&mut self) {
-        if !self.active {
-            return;
-        }
-
-        let mut result = 0_u64;
-        let success = unsafe { recursive_step(self.value, &mut result) };
-
-        if success == 1 {
-            self.value = result;
-        } else {
-            self.active = false;
-            println!("[OVERFLOW] {} reached the u64 limit; value frozen.", self.name);
-        }
-    }
-}
-
-fn scan_disks() {
+fn scan_all_disks() -> Result<u64, String> {
     let disks = Disks::new_with_refreshed_list();
+    let mut total_bytes = 0_u64;
 
-    println!("\n===== DISK SCANNER =====");
+    println!("\n===== INITIAL DISK SCAN =====");
+
+    if disks.list().is_empty() {
+        return Err("No mounted disks or volumes were detected.".to_string());
+    }
 
     for disk in disks.list() {
-        let total = disk.total_space();
-        let available = disk.available_space();
-        let used = total.saturating_sub(available);
-
-        let status = if available == 0 {
-            "FULL"
-        } else {
-            "AVAILABLE"
-        };
+        let capacity = disk.total_space();
+        total_bytes = total_bytes
+            .checked_add(capacity)
+            .ok_or_else(|| "Total disk capacity exceeds the u64 range.".to_string())?;
 
         println!(
-            "Disk: {:?} | Total: {} MB | Used: {} MB | Free: {} MB | {}",
+            "Volume: {:?} | Capacity: {} bytes ({:.2} GiB)",
             disk.mount_point(),
-            total / 1_048_576,
-            used / 1_048_576,
-            available / 1_048_576,
-            status
+            capacity,
+            capacity as f64 / 1_073_741_824.0
         );
     }
+
+    println!(
+        "\nTOTAL BASE VALUE: {} bytes ({:.2} GiB)",
+        total_bytes,
+        total_bytes as f64 / 1_073_741_824.0
+    );
+
+    Ok(total_bytes)
 }
 
-fn self_discovery(system: &System) {
-    let pid = process::id();
+fn calculate_next(current: u64, disk_total: u64) -> Result<u64, String> {
+    let mut next = 0_u64;
+    let success = unsafe { growth_add(current, disk_total, &mut next) };
 
-    println!("\n===== SELF DISCOVERY =====");
-    println!("Process ID: {}", pid);
-
-    if let Some(current) = system.process(sysinfo::Pid::from_u32(pid)) {
-        println!("Process RAM: {} MB", current.memory() / 1_048_576);
+    if success == 1 {
+        Ok(next)
     } else {
-        println!("Process information unavailable");
+        Err("The next sum would overflow uint64_t. Calculation stopped safely.".to_string())
     }
 }
 
 fn main() {
-    println!("==============================");
-    println!("      SELF-GROWTH.EXE");
-    println!("      VERSION 1.0");
-    println!("==============================");
+    println!("======================================");
+    println!("          SELF-GROWTH.EXE");
+    println!("          DISK SUMMATION V2");
+    println!("======================================");
 
-    let mut memory = GrowthValue::new("MEMORY", 1);
-    let mut engine = GrowthValue::new("ENGINE", 2);
-    let mut growth = GrowthValue::new("GROWTH", 3);
+    // Discover disk capacities once. This fixed total is the summation increment.
+    let disk_total = match scan_all_disks() {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("[SCAN ERROR] {error}");
+            return;
+        }
+    };
 
-    let mut system = System::new_all();
+    // S(0) = T, where T is the sum of all detected disk capacities.
+    let mut accumulated = disk_total;
     let mut iteration: u64 = 0;
 
+    println!("\n===== CONTINUOUS SUMMATION =====");
+    println!("S(0) = T = {accumulated} bytes");
+    println!("Interval: 2 seconds");
+    println!("Press Ctrl+C to stop.");
+
     loop {
-        iteration = iteration.saturating_add(1);
-        println!("\n========== LOOP {} ==========", iteration);
-
-        system.refresh_all();
-        self_discovery(&system);
-        scan_disks();
-
-        memory.calculate();
-        engine.calculate();
-        growth.calculate();
-
-        println!("\n===== RECURSIVE ENGINE =====");
-        println!("Memory: {} | Active: {}", memory.value, memory.active);
-        println!("Engine: {} | Active: {}", engine.value, engine.active);
-        println!("Growth: {} | Active: {}", growth.value, growth.active);
-        println!("============================");
-
         thread::sleep(Duration::from_secs(2));
+
+        match calculate_next(accumulated, disk_total) {
+            Ok(next) => {
+                accumulated = next;
+                iteration = iteration.saturating_add(1);
+
+                println!(
+                    "Cycle {iteration} | S({iteration}) = {} bytes ({:.2} GiB)",
+                    accumulated,
+                    accumulated as f64 / 1_073_741_824.0
+                );
+            }
+            Err(error) => {
+                eprintln!("[CALCULATION STOP] {error}");
+                eprintln!("Last valid accumulated value: {accumulated} bytes");
+                break;
+            }
+        }
     }
 }
