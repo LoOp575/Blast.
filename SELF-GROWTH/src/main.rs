@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sysinfo::Disks;
 
@@ -164,6 +164,9 @@ fn main() {
     let mut iteration: u64 = 0;
     let mut total_written: u64 = 0;
     let mut written_cycles: u64 = 0;
+    let run_started = Instant::now();
+    let mut total_write_time = Duration::ZERO;
+    let mut total_calculation_time = Duration::ZERO;
 
     println!("\n===== CALCULATION + DISK WRITING =====");
     println!("S(0) = T = {accumulated} bytes");
@@ -174,6 +177,7 @@ fn main() {
     println!("Press Ctrl+C to stop.");
 
     loop {
+        let write_started = Instant::now();
         match write_cycle_file(
             output_dir,
             iteration,
@@ -181,10 +185,20 @@ fn main() {
             MAX_TOTAL_BYTES - total_written,
         ) {
             Ok(written) => {
+                let write_elapsed = write_started.elapsed();
+                total_write_time += write_elapsed;
                 total_written += written;
                 written_cycles += 1;
+                let write_seconds = write_elapsed.as_secs_f64();
+                let write_mib_s = if write_seconds > 0.0 {
+                    written as f64 / 1_048_576.0 / write_seconds
+                } else {
+                    f64::INFINITY
+                };
                 println!(
-                    "[WRITE OK] Cycle {iteration} | S({iteration}) = {accumulated} bytes | file written = {written} bytes | total written = {total_written} bytes"
+                    "[WRITE OK] Cycle {iteration} | value = {accumulated} bytes | written = {written} bytes | write_time = {:.3} ms | speed = {:.3} MiB/s | total_written = {total_written} bytes",
+                    write_elapsed.as_secs_f64() * 1000.0,
+                    write_mib_s
                 );
             }
             Err(error) => {
@@ -197,8 +211,11 @@ fn main() {
 
         thread::sleep(Duration::from_secs(2));
 
+        let calculation_started = Instant::now();
         match calculate_next(accumulated, disk_total) {
             Ok(next) => {
+                let calculation_elapsed = calculation_started.elapsed();
+                total_calculation_time += calculation_elapsed;
                 accumulated = next;
                 iteration = match iteration.checked_add(1) {
                     Some(value) => value,
@@ -208,7 +225,8 @@ fn main() {
                     }
                 };
                 println!(
-                    "[CALCULATION] Next value S({iteration}) = {accumulated} bytes"
+                    "[CALCULATION] Next value S({iteration}) = {accumulated} bytes | calculation_time = {:.3} microseconds",
+                    calculation_elapsed.as_secs_f64() * 1_000_000.0
                 );
             }
             Err(error) => {
@@ -219,9 +237,19 @@ fn main() {
         }
     }
 
+    let total_elapsed = run_started.elapsed();
+    let write_seconds = total_write_time.as_secs_f64();
+    let aggregate_mib_s = if write_seconds > 0.0 {
+        total_written as f64 / 1_048_576.0 / write_seconds
+    } else {
+        0.0
+    };
+
     println!(
-        "\n[FINISHED] Cycles written: {} | Total physical payload written: {} bytes",
-        written_cycles,
-        total_written
+        "\n===== PERFORMANCE SUMMARY =====\nCycles written: {written_cycles}\nPayload written: {total_written} bytes\nTotal elapsed (includes 2-second cycle delays): {:.3} seconds\nTime spent writing: {:.3} seconds\nAverage write throughput: {:.3} MiB/s\nTime spent calculating: {:.3} microseconds",
+        total_elapsed.as_secs_f64(),
+        write_seconds,
+        aggregate_mib_s,
+        total_calculation_time.as_secs_f64() * 1_000_000.0
     );
 }
