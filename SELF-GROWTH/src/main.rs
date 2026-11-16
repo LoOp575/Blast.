@@ -1,23 +1,13 @@
+use num_bigint::BigUint;
 use std::env;
-use std::ffi::c_int;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
-
+use std::time::Instant;
 use sysinfo::Disks;
 
-extern "C" {
-    fn growth_add(current: u64, disk_total: u64, result: *mut u64) -> c_int;
-}
-
-// Hard safety limits for the on-disk experiment.
-// These limits do not change the mathematical recurrence.
-const MAX_FILE_BYTES: u64 = 1 * 1024 * 1024;
-const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
-const WRITE_CHUNK_BYTES: usize = 64 * 1024;
-const WRITE_PATTERN: [u8; 16] = *b"SELF-GROWTH-DATA";
+// Memory-I/O experiment budget. This bounds the amount of byte work per run,
+// not the mathematical representation of the recurrence.
+const MAX_TEST_BYTES: u64 = 64 * 1024 * 1024;
+const CHUNK_BYTES: usize = 64 * 1024;
+const BYTE_PATTERN: u8 = 0xAA;
 
 fn scan_all_disks() -> Result<u64, String> {
     let disks = Disks::new_with_refreshed_list();
@@ -44,7 +34,7 @@ fn scan_all_disks() -> Result<u64, String> {
     }
 
     println!(
-        "\nTOTAL BASE VALUE: {} bytes ({:.2} GiB)",
+        "\nTOTAL DISK BASE: {} bytes ({:.2} GiB)",
         total_bytes,
         total_bytes as f64 / 1_073_741_824.0
     );
@@ -52,79 +42,26 @@ fn scan_all_disks() -> Result<u64, String> {
     Ok(total_bytes)
 }
 
-fn calculate_next(current: u64, disk_total: u64) -> Result<u64, String> {
-    let mut next = 0_u64;
-    let success = unsafe { growth_add(current, disk_total, &mut next) };
+fn process_memory_bytes(target_bytes: u64, buffer: &mut [u8]) -> u64 {
+    let mut processed = 0_u64;
 
-    if success == 1 {
-        Ok(next)
-    } else {
-        Err("The next sum would overflow uint64_t. Calculation stopped safely.".to_string())
-    }
-}
+    while processed < target_bytes {
+        let amount = (target_bytes - processed).min(buffer.len() as u64) as usize;
 
-fn write_cycle_file(
-    directory: &Path,
-    iteration: u64,
-    requested_bytes: u64,
-    remaining_budget: u64,
-) -> io::Result<u64> {
-    if requested_bytes > MAX_FILE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "cycle requests {requested_bytes} bytes; per-file experiment limit is {MAX_FILE_BYTES} bytes"
-            ),
-        ));
+        // Memory I/O: overwrite a bounded RAM buffer with the output pattern.
+        buffer[..amount].fill(BYTE_PATTERN);
+        std::hint::black_box(&buffer[..amount]);
+
+        processed += amount as u64;
     }
 
-    if requested_bytes > remaining_budget {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "cycle requests {requested_bytes} bytes; only {remaining_budget} bytes remain in the experiment budget"
-            ),
-        ));
-    }
-
-    let file_path: PathBuf = directory.join(format!("cycle-{iteration:08}.bin"));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&file_path)?;
-
-    let mut remaining = requested_bytes;
-    let mut buffer = [0_u8; WRITE_CHUNK_BYTES];
-
-    for (index, byte) in buffer.iter_mut().enumerate() {
-        *byte = WRITE_PATTERN[index % WRITE_PATTERN.len()];
-    }
-
-    while remaining > 0 {
-        let amount = remaining.min(buffer.len() as u64) as usize;
-        file.write_all(&buffer[..amount])?;
-        remaining -= amount as u64;
-    }
-
-    file.sync_all()?;
-
-    let actual_bytes = fs::metadata(&file_path)?.len();
-    if actual_bytes != requested_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "file size verification failed: requested {requested_bytes}, actual {actual_bytes}"
-            ),
-        ));
-    }
-
-    Ok(actual_bytes)
+    processed
 }
 
 fn main() {
     println!("======================================");
-    println!("          SELF-GROWTH.EXE");
-    println!("     RECURSIVE CALCULATION + WRITER");
+    println!("       SELF-GROWTH MEMORY ENGINE");
+    println!("     RECURSIVE VALUE + MEMORY I/O");
     println!("======================================");
 
     let scanned_total = match scan_all_disks() {
@@ -135,9 +72,9 @@ fn main() {
         }
     };
 
-    // Optional small seed for controlled lab runs.
-    // Example (PowerShell): $env:SELF_GROWTH_TEST_BASE_BYTES="1024"
-    let (disk_total, test_override) = match env::var("SELF_GROWTH_TEST_BASE_BYTES") {
+    // Optional small seed for controlled tests while retaining the real scan.
+    // PowerShell: $env:SELF_GROWTH_TEST_BASE_BYTES="1024"
+    let (base_value, test_override) = match env::var("SELF_GROWTH_TEST_BASE_BYTES") {
         Ok(value) => match value.parse::<u64>() {
             Ok(parsed) if parsed > 0 => (parsed, true),
             _ => {
@@ -150,106 +87,77 @@ fn main() {
 
     if test_override {
         println!(
-            "\n[LAB OVERRIDE] Using test base: {disk_total} bytes. Scanned capacity remains informational."
+            "[LAB OVERRIDE] Using {base_value} bytes as the recurrence seed. Disk scan remains informational."
         );
     }
 
-    let output_dir = Path::new("self-growth-lab");
-    if let Err(error) = fs::create_dir_all(output_dir) {
-        eprintln!("[WRITER ERROR] Cannot create lab directory: {error}");
-        return;
-    }
-
-    let mut accumulated = disk_total;
-    let mut iteration: u64 = 0;
-    let mut total_written: u64 = 0;
-    let mut written_cycles: u64 = 0;
-    let run_started = Instant::now();
-    let mut total_write_time = Duration::ZERO;
-    let mut total_calculation_time = Duration::ZERO;
-
-    println!("\n===== CALCULATION + DISK WRITING =====");
-    println!("S(0) = T = {accumulated} bytes");
-    println!("Output directory: {}", output_dir.display());
-    println!("Maximum file size: {MAX_FILE_BYTES} bytes");
-    println!("Maximum total written: {MAX_TOTAL_BYTES} bytes");
-    println!("Interval: 2 seconds");
+    println!("Memory-I/O test budget: {MAX_TEST_BYTES} bytes");
+    println!("Memory-I/O chunk size: {CHUNK_BYTES} bytes");
+    println!("Byte pattern: 0x{BYTE_PATTERN:02X}");
+    println!("No files are created and no disk data is written.");
     println!("Press Ctrl+C to stop.");
 
+    let mut current = BigUint::from(base_value);
+    let test_budget = BigUint::from(MAX_TEST_BYTES);
+    let mut buffer = vec![0_u8; CHUNK_BYTES];
+    let mut cycle = 0_u64;
+    let mut total_processed = 0_u64;
+    let run_started = Instant::now();
+
+    println!("\n===== RECURSIVE MEMORY-I/O TEST =====");
+
     loop {
-        let write_started = Instant::now();
-        match write_cycle_file(
-            output_dir,
-            iteration,
-            accumulated,
-            MAX_TOTAL_BYTES - total_written,
-        ) {
-            Ok(written) => {
-                let write_elapsed = write_started.elapsed();
-                total_write_time += write_elapsed;
-                total_written += written;
-                written_cycles += 1;
-                let write_seconds = write_elapsed.as_secs_f64();
-                let write_mib_s = if write_seconds > 0.0 {
-                    written as f64 / 1_048_576.0 / write_seconds
-                } else {
-                    f64::INFINITY
-                };
-                println!(
-                    "[WRITE OK] Cycle {iteration} | value = {accumulated} bytes | written = {written} bytes | write_time = {:.3} ms | speed = {:.3} MiB/s | total_written = {total_written} bytes",
-                    write_elapsed.as_secs_f64() * 1000.0,
-                    write_mib_s
-                );
-            }
-            Err(error) => {
-                eprintln!(
-                    "[WRITER STOP] Cycle {iteration} was not written: {error}"
-                );
-                break;
-            }
+        // The numeric value is also the requested byte-work amount.
+        // Keep the arbitrary-precision value, but only process values within
+        // the explicit lab budget so the test cannot exhaust system RAM.
+        if current > test_budget {
+            println!(
+                "[TEST STOP] Next target exceeds the {MAX_TEST_BYTES}-byte lab budget."
+            );
+            break;
         }
 
-        thread::sleep(Duration::from_secs(2));
+        let target_bytes = current
+            .to_u64_digits()
+            .first()
+            .copied()
+            .unwrap_or(0);
 
-        let calculation_started = Instant::now();
-        match calculate_next(accumulated, disk_total) {
-            Ok(next) => {
-                let calculation_elapsed = calculation_started.elapsed();
-                total_calculation_time += calculation_elapsed;
-                accumulated = next;
-                iteration = match iteration.checked_add(1) {
-                    Some(value) => value,
-                    None => {
-                        eprintln!("[CALCULATION STOP] Iteration counter overflow.");
-                        break;
-                    }
-                };
-                println!(
-                    "[CALCULATION] Next value S({iteration}) = {accumulated} bytes | calculation_time = {:.3} microseconds",
-                    calculation_elapsed.as_secs_f64() * 1_000_000.0
-                );
-            }
-            Err(error) => {
-                eprintln!("[CALCULATION STOP] {error}");
-                eprintln!("Last valid accumulated value: {accumulated} bytes");
+        let started = Instant::now();
+        let processed = process_memory_bytes(target_bytes, &mut buffer);
+        let elapsed = started.elapsed();
+
+        total_processed = match total_processed.checked_add(processed) {
+            Some(value) => value,
+            None => {
+                eprintln!("[TEST STOP] Processed-byte counter overflow.");
                 break;
             }
-        }
+        };
+
+        println!(
+            "[MEMORY I/O] Cycle {cycle} | numeric_value = {current} bytes | processed = {processed} bytes | time = {:.3} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+
+        // Original self-summing recurrence: S(n+1) = S(n) + S(n).
+        current = &current + &current;
+
+        cycle = match cycle.checked_add(1) {
+            Some(value) => value,
+            None => {
+                eprintln!("[TEST STOP] Cycle counter overflow.");
+                break;
+            }
+        };
     }
 
-    let total_elapsed = run_started.elapsed();
-    let write_seconds = total_write_time.as_secs_f64();
-    let aggregate_mib_s = if write_seconds > 0.0 {
-        total_written as f64 / 1_048_576.0 / write_seconds
-    } else {
-        0.0
-    };
-
     println!(
-        "\n===== PERFORMANCE SUMMARY =====\nCycles written: {written_cycles}\nPayload written: {total_written} bytes\nTotal elapsed (includes 2-second cycle delays): {:.3} seconds\nTime spent writing: {:.3} seconds\nAverage write throughput: {:.3} MiB/s\nTime spent calculating: {:.3} microseconds",
-        total_elapsed.as_secs_f64(),
-        write_seconds,
-        aggregate_mib_s,
-        total_calculation_time.as_secs_f64() * 1_000_000.0
+        "\n===== PERFORMANCE SUMMARY =====\nCycles processed: {cycle}\nTotal byte-work: {total_processed} bytes\nTotal elapsed: {:.3} seconds\nRAM working buffer: {} bytes",
+        run_started.elapsed().as_secs_f64(),
+        buffer.len()
+    );
+    println!(
+        "Note: byte-work is processed in a reusable fixed-size RAM buffer; the entire numeric target is not allocated at once."
     );
 }
