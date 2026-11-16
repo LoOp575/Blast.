@@ -1,14 +1,12 @@
 # SELF-GROWTH.EXE
 
-C + Rust implementation: **Disk Core Discovery and Continuous Summation**.
+C + Rust implementation: **Recursive Calculation + Disk Writer**.
 
 ## Core behavior
 
-SELF-GROWTH does not search for or evaluate installed applications. It discovers mounted disks/volumes, reads each volume's total capacity, sums those capacities once, and then continuously adds that fixed baseline to the accumulated value.
+SELF-GROWTH discovers mounted volumes and sums their reported capacities once. The sum becomes a fixed recurrence increment. Each recurrence value is then used as the exact requested size of a new data file in the local `self-growth-lab` directory.
 
 ## Formula
-
-Let each detected volume have total capacity (D_i).
 
 ```
 T = D1 + D2 + ... + Dn
@@ -16,43 +14,64 @@ S(0) = T
 S(k+1) = S(k) + T
 ```
 
-Example, if the detected capacities total 2 TB:
+For each cycle k, the writer creates a new file:
 
-- Initial value S(0): 2 TB
-- Cycle 1: 4 TB
-- Cycle 2: 6 TB
-- Cycle 3: 8 TB
+```
+cycle-00000000.bin  -> S(0) bytes
+cycle-00000001.bin  -> S(1) bytes
+cycle-00000002.bin  -> S(2) bytes
+...
+```
 
-The displayed accumulated value is a mathematical counter. It is **not** physical disk usage and does not write or allocate data on any disk.
+Each file is filled with a repeated deterministic byte pattern. The program verifies the resulting file length after writing.
+
+## Safety limits
+
+The writer is deliberately restricted to a local experiment directory:
+- Maximum individual file: 1 MiB.
+- Maximum combined payload written by one run: 16 MiB.
+- The writer stops before creating a file that would exceed either limit.
+- It does not write to every discovered disk, alter existing files, or attempt to fill free disk space.
+- These storage limits do not alter the recurrence calculation.
+
+Because real disk capacity totals are normally much larger than 1 MiB, a normal scan may cause the writer to stop before its first file. Use the explicit test override for small controlled tests.
+
+## Controlled test
+
+PowerShell:
+
+```powershell
+$env:SELF_GROWTH_TEST_BASE_BYTES="1024"
+cargo run --release
+```
+
+This keeps the disk scan visible but uses 1024 as the recurrence seed for the lab run. Expected file sizes begin at 1024, 2048, 3072, 4096 bytes, and so on. The run stops automatically at the configured per-file or total-write limit.
+
+Remove the override in PowerShell with:
+
+```powershell
+Remove-Item Env:SELF_GROWTH_TEST_BASE_BYTES
+```
 
 ## Architecture
 
-- `src/main.rs` (Rust): discovers mounted volumes once, reads total capacity, establishes the baseline, and controls the continuous loop.
-- `src/recursive.c` (C): performs checked addition for each summation cycle.
+- `src/main.rs` (Rust): scans mounted volumes, controls the recurrence, writes one new file per cycle, and verifies each file size.
+- `src/recursive.c` (C): performs checked 64-bit addition.
 - `build.rs`: compiles the C calculation engine through the `cc` crate.
 
-## Runtime behavior
+## Important technical limits
 
-- Disk discovery occurs once at startup.
-- Every detected mounted volume contributes its reported total capacity to the baseline.
-- The controller adds the same baseline every two seconds.
-- Ctrl+C stops the process normally.
-- If the result exceeds `uint64_t`, calculation stops safely and reports the last valid value.
-- No files are modified, no disk space is allocated, and no application storage quota is imposed.
+- The current recurrence uses unsigned 64-bit integers and stops safely before overflow. It is not mathematically unbounded.
+- The scanner enumerates mounted volumes exposed by the operating system. Partitions and mount points may be counted separately; this does not guarantee unique physical-drive capacity.
+- The writer writes to the filesystem containing the program's current working directory, not automatically to every scanned volume.
 
-Note: the scanner enumerates mounted volumes exposed by the operating system. Separate partitions or mount points are counted as separate volumes. This is not guaranteed to represent unique physical drives.
-
-## Build
+## Build and run
 
 Install Rust and a compatible C compiler, then run from this directory:
 
-```sh
+```powershell
 cargo build --release
 cargo run --release
 ```
 
-On Windows, the release executable is `target/release/self-growth.exe`.
-
-## Verification status
-
-Source files were updated in the repository. Compilation and runtime testing have not yet been performed in this environment.
+Compilation and runtime testing must still be performed on the target Windows machine.
