@@ -3,9 +3,7 @@ use std::env;
 use std::time::Instant;
 use sysinfo::Disks;
 
-// Memory-I/O experiment budget. This bounds the amount of byte work per run,
-// not the mathematical representation of the recurrence.
-const MAX_TEST_BYTES: u64 = 64 * 1024 * 1024;
+// This is the reusable RAM chunk size, not a limit on total byte-work.
 const CHUNK_BYTES: usize = 64 * 1024;
 const BYTE_PATTERN: u8 = 0xAA;
 
@@ -42,17 +40,27 @@ fn scan_all_disks() -> Result<u64, String> {
     Ok(total_bytes)
 }
 
-fn process_memory_bytes(target_bytes: u64, buffer: &mut [u8]) -> u64 {
-    let mut processed = 0_u64;
+fn process_memory_bytes(target_bytes: &BigUint, buffer: &mut [u8]) -> BigUint {
+    let mut remaining = target_bytes.clone();
+    let mut processed = BigUint::from(0_u8);
+    let chunk_size = BigUint::from(buffer.len());
 
-    while processed < target_bytes {
-        let amount = (target_bytes - processed).min(buffer.len() as u64) as usize;
+    while remaining > BigUint::from(0_u8) {
+        let amount = if remaining >= chunk_size {
+            buffer.len()
+        } else {
+            // This conversion is safe because remaining is smaller than
+            // the allocated buffer length (64 KiB by default).
+            remaining.to_u64_digits().first().copied().unwrap_or(0) as usize
+        };
 
         // Memory I/O: overwrite a bounded RAM buffer with the output pattern.
         buffer[..amount].fill(BYTE_PATTERN);
         std::hint::black_box(&buffer[..amount]);
 
-        processed += amount as u64;
+        let completed = BigUint::from(amount);
+        processed += &completed;
+        remaining -= completed;
     }
 
     processed
@@ -91,49 +99,27 @@ fn main() {
         );
     }
 
-    println!("Memory-I/O test budget: {MAX_TEST_BYTES} bytes");
-    println!("Memory-I/O chunk size: {CHUNK_BYTES} bytes");
+    println!("Total byte-work limit: NONE");
+    println!("Reusable RAM chunk size: {CHUNK_BYTES} bytes");
     println!("Byte pattern: 0x{BYTE_PATTERN:02X}");
     println!("No files are created and no disk data is written.");
-    println!("Press Ctrl+C to stop.");
+    println!("Press Ctrl+C to stop. Large targets can take an impractically long time.");
 
     let mut current = BigUint::from(base_value);
-    let test_budget = BigUint::from(MAX_TEST_BYTES);
     let mut buffer = vec![0_u8; CHUNK_BYTES];
     let mut cycle = 0_u64;
-    let mut total_processed = 0_u64;
+    let mut total_processed = BigUint::from(0_u8);
     let run_started = Instant::now();
 
     println!("\n===== RECURSIVE MEMORY-I/O TEST =====");
 
     loop {
-        // The numeric value is also the requested byte-work amount.
-        // Keep the arbitrary-precision value, but only process values within
-        // the explicit lab budget so the test cannot exhaust system RAM.
-        if current > test_budget {
-            println!(
-                "[TEST STOP] Next target exceeds the {MAX_TEST_BYTES}-byte lab budget."
-            );
-            break;
-        }
-
-        let target_bytes = current
-            .to_u64_digits()
-            .first()
-            .copied()
-            .unwrap_or(0);
-
+        // The full arbitrary-precision value is processed as byte-work.
+        // Only a fixed-size chunk is resident in the reusable RAM buffer.
         let started = Instant::now();
-        let processed = process_memory_bytes(target_bytes, &mut buffer);
+        let processed = process_memory_bytes(&current, &mut buffer);
         let elapsed = started.elapsed();
-
-        total_processed = match total_processed.checked_add(processed) {
-            Some(value) => value,
-            None => {
-                eprintln!("[TEST STOP] Processed-byte counter overflow.");
-                break;
-            }
-        };
+        total_processed += &processed;
 
         println!(
             "[MEMORY I/O] Cycle {cycle} | numeric_value = {current} bytes | processed = {processed} bytes | time = {:.3} ms",
@@ -158,6 +144,6 @@ fn main() {
         buffer.len()
     );
     println!(
-        "Note: byte-work is processed in a reusable fixed-size RAM buffer; the entire numeric target is not allocated at once."
+        "Note: total byte-work has no preset cap; processing uses a reusable fixed-size RAM buffer."
     );
 }
