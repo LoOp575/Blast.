@@ -80,7 +80,7 @@ fn write_cycle_file(
 
     if requested_bytes > remaining_budget {
         return Err(io::Error::new(
-            io::ErrorKind::StorageFull,
+            io::ErrorKind::Other,
             format!(
                 "cycle requests {requested_bytes} bytes; only {remaining_budget} bytes remain in the experiment budget"
             ),
@@ -163,6 +163,7 @@ fn main() {
     let mut accumulated = disk_total;
     let mut iteration: u64 = 0;
     let mut total_written: u64 = 0;
+    let mut written_cycles: u64 = 0;
 
     println!("\n===== CALCULATION + DISK WRITING =====");
     println!("S(0) = T = {accumulated} bytes");
@@ -181,6 +182,7 @@ fn main() {
         ) {
             Ok(written) => {
                 total_written += written;
+                written_cycles += 1;
                 println!(
                     "[WRITE OK] Cycle {iteration} | S({iteration}) = {accumulated} bytes | file written = {written} bytes | total written = {total_written} bytes"
                 );
@@ -219,7 +221,7 @@ fn main() {
 
     println!(
         "\n[FINISHED] Cycles written: {} | Total physical payload written: {} bytes",
-        iteration.saturating_add(1),
+        written_cycles,
         total_written
     );
 }
