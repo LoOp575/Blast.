@@ -3,7 +3,8 @@ use std::env;
 use std::time::Instant;
 use sysinfo::Disks;
 
-// This is the reusable RAM chunk size, not a limit on total byte-work.
+// LAB_UNBOUNDED removes the total byte-work budget.
+// This is a reusable working-buffer size, not the total amount processed.
 const CHUNK_BYTES: usize = 64 * 1024;
 const BYTE_PATTERN: u8 = 0xAA;
 
@@ -40,6 +41,8 @@ fn scan_all_disks() -> Result<u64, String> {
     Ok(total_bytes)
 }
 
+// Processes exactly target_bytes bytes of work by repeatedly reusing
+// one fixed-size RAM buffer. No file is created or written.
 fn process_memory_bytes(target_bytes: &BigUint, buffer: &mut [u8]) -> BigUint {
     let mut remaining = target_bytes.clone();
     let mut processed = BigUint::from(0_u8);
@@ -49,12 +52,14 @@ fn process_memory_bytes(target_bytes: &BigUint, buffer: &mut [u8]) -> BigUint {
         let amount = if remaining >= chunk_size {
             buffer.len()
         } else {
-            // This conversion is safe because remaining is smaller than
-            // the allocated buffer length (64 KiB by default).
+            // remaining < buffer.len(), so its low u64 limb is sufficient.
             remaining.to_u64_digits().first().copied().unwrap_or(0) as usize
         };
 
-        // Memory I/O: overwrite a bounded RAM buffer with the output pattern.
+        if amount == 0 {
+            break;
+        }
+
         buffer[..amount].fill(BYTE_PATTERN);
         std::hint::black_box(&buffer[..amount]);
 
@@ -68,8 +73,8 @@ fn process_memory_bytes(target_bytes: &BigUint, buffer: &mut [u8]) -> BigUint {
 
 fn main() {
     println!("======================================");
-    println!("       SELF-GROWTH MEMORY ENGINE");
-    println!("     RECURSIVE VALUE + MEMORY I/O");
+    println!("          SELF-GROWTH.EXE");
+    println!("          LAB_UNBOUNDED MODE");
     println!("======================================");
 
     let scanned_total = match scan_all_disks() {
@@ -80,13 +85,15 @@ fn main() {
         }
     };
 
-    // Optional small seed for controlled tests while retaining the real scan.
+    // Optional controlled seed for lab experiments.
     // PowerShell: $env:SELF_GROWTH_TEST_BASE_BYTES="1024"
     let (base_value, test_override) = match env::var("SELF_GROWTH_TEST_BASE_BYTES") {
         Ok(value) => match value.parse::<u64>() {
             Ok(parsed) if parsed > 0 => (parsed, true),
             _ => {
-                eprintln!("[CONFIG ERROR] SELF_GROWTH_TEST_BASE_BYTES must be a positive integer.");
+                eprintln!(
+                    "[CONFIG ERROR] SELF_GROWTH_TEST_BASE_BYTES must be a positive integer."
+                );
                 return;
             }
         },
@@ -95,15 +102,19 @@ fn main() {
 
     if test_override {
         println!(
-            "[LAB OVERRIDE] Using {base_value} bytes as the recurrence seed. Disk scan remains informational."
+            "[LAB OVERRIDE] Using {base_value} bytes as recurrence seed. Disk scan remains informational."
         );
     }
 
-    println!("Total byte-work limit: NONE");
-    println!("Reusable RAM chunk size: {CHUNK_BYTES} bytes");
+    println!("Total byte-work budget: NONE");
+    println!("Recursive integer: arbitrary precision (BigUint)");
+    println!("RAM working chunk: {CHUNK_BYTES} bytes, reused continuously");
     println!("Byte pattern: 0x{BYTE_PATTERN:02X}");
-    println!("No files are created and no disk data is written.");
-    println!("Press Ctrl+C to stop. Large targets can take an impractically long time.");
+    println!("Disk writes: DISABLED");
+    println!("Stop the process with Ctrl+C.");
+    println!(
+        "Important: byte-work is uncapped, but the RAM working buffer is fixed-size. Very large targets can take an impractically long time."
+    );
 
     let mut current = BigUint::from(base_value);
     let mut buffer = vec![0_u8; CHUNK_BYTES];
@@ -111,39 +122,34 @@ fn main() {
     let mut total_processed = BigUint::from(0_u8);
     let run_started = Instant::now();
 
-    println!("\n===== RECURSIVE MEMORY-I/O TEST =====");
-
     loop {
-        // The full arbitrary-precision value is processed as byte-work.
-        // Only a fixed-size chunk is resident in the reusable RAM buffer.
+        println!("\n===== CYCLE {cycle} =====");
+        println!("Recursive target: {current} bytes");
+
         let started = Instant::now();
         let processed = process_memory_bytes(&current, &mut buffer);
         let elapsed = started.elapsed();
+
         total_processed += &processed;
 
-        println!(
-            "[MEMORY I/O] Cycle {cycle} | numeric_value = {current} bytes | processed = {processed} bytes | time = {:.3} ms",
-            elapsed.as_secs_f64() * 1000.0
-        );
+        println!("Processed: {processed} bytes");
+        println!("Processing time: {:.3} seconds", elapsed.as_secs_f64());
 
-        // Original self-summing recurrence: S(n+1) = S(n) + S(n).
+        // S(n+1) = S(n) + S(n)
         current = &current + &current;
 
         cycle = match cycle.checked_add(1) {
             Some(value) => value,
             None => {
-                eprintln!("[TEST STOP] Cycle counter overflow.");
+                eprintln!("[STOP] Cycle counter overflow.");
                 break;
             }
         };
     }
 
-    println!(
-        "\n===== PERFORMANCE SUMMARY =====\nCycles processed: {cycle}\nTotal byte-work: {total_processed} bytes\nTotal elapsed: {:.3} seconds\nRAM working buffer: {} bytes",
-        run_started.elapsed().as_secs_f64(),
-        buffer.len()
-    );
-    println!(
-        "Note: total byte-work has no preset cap; processing uses a reusable fixed-size RAM buffer."
-    );
+    println!("\n===== LAB SUMMARY =====");
+    println!("Completed cycles: {cycle}");
+    println!("Total byte-work: {total_processed} bytes");
+    println!("Total elapsed: {:.3} seconds", run_started.elapsed().as_secs_f64());
+    println!("RAM working chunk: {} bytes", buffer.len());
 }
