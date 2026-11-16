@@ -1,26 +1,46 @@
 # SELF-GROWTH.EXE
 
-Initial C + Rust implementation.
+C + Rust implementation: **Disk Core Discovery and Continuous Summation**.
 
-## Structure
+## Core behavior
 
-- `src/recursive.c`: recursive calculation engine.
-- `src/main.rs`: self-discovery, all-disk scan, and continuous controller.
-- `build.rs`: compiles the C engine through the `cc` crate.
+SELF-GROWTH does not search for or evaluate installed applications. It discovers mounted disks/volumes, reads each volume's total capacity, sums those capacities once, and then continuously adds that fixed baseline to the accumulated value.
 
 ## Formula
 
+Let each detected volume have total capacity (D_i).
+
 ```
-x(n+1) = x(n)^2 + 1
+T = D1 + D2 + ... + Dn
+S(0) = T
+S(k+1) = S(k) + T
 ```
 
-Initial independent values:
+Example, if the detected capacities total 2 TB:
 
-- MEMORY = 1
-- ENGINE = 2
-- GROWTH = 3
+- Initial value S(0): 2 TB
+- Cycle 1: 4 TB
+- Cycle 2: 6 TB
+- Cycle 3: 8 TB
 
-Each active value is advanced once per controller loop. The loop repeats every two seconds.
+The displayed accumulated value is a mathematical counter. It is **not** physical disk usage and does not write or allocate data on any disk.
+
+## Architecture
+
+- `src/main.rs` (Rust): discovers mounted volumes once, reads total capacity, establishes the baseline, and controls the continuous loop.
+- `src/recursive.c` (C): performs checked addition for each summation cycle.
+- `build.rs`: compiles the C calculation engine through the `cc` crate.
+
+## Runtime behavior
+
+- Disk discovery occurs once at startup.
+- Every detected mounted volume contributes its reported total capacity to the baseline.
+- The controller adds the same baseline every two seconds.
+- Ctrl+C stops the process normally.
+- If the result exceeds `uint64_t`, calculation stops safely and reports the last valid value.
+- No files are modified, no disk space is allocated, and no application storage quota is imposed.
+
+Note: the scanner enumerates mounted volumes exposed by the operating system. Separate partitions or mount points are counted as separate volumes. This is not guaranteed to represent unique physical drives.
 
 ## Build
 
@@ -33,9 +53,6 @@ cargo run --release
 
 On Windows, the release executable is `target/release/self-growth.exe`.
 
-## Notes
+## Verification status
 
-- The C engine uses checked `uint64_t` arithmetic. A value stops advancing if its next result would overflow; the Rust controller continues.
-- Disk scanning is read-only. The application does not fill disks or impose an application storage quota.
-- Stop the process with Ctrl+C in the terminal.
-- This source has not yet been compiled or runtime-tested in this repository environment.
+Source files were updated in the repository. Compilation and runtime testing have not yet been performed in this environment.
