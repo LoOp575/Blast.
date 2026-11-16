@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 sysinfo = "=0.30.13"
+num-bigint = "0.4"
 
 [build-dependencies]
 cc = "1.0"
