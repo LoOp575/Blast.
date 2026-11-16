@@ -1,17 +1,17 @@
 #include <stdint.h>
-#include <limits.h>
+#include <stddef.h>
 
-// x(n+1) = x(n) * x(n) + 1
-// Returns 1 on success, 0 if the result would overflow uint64_t.
-int recursive_step(uint64_t x, uint64_t *result) {
-    if (result == 0) {
+// Computes S(next) = S(current) + disk_total.
+// Returns 1 on success, 0 for invalid output pointer or uint64_t overflow.
+int growth_add(uint64_t current, uint64_t disk_total, uint64_t *result) {
+    if (result == NULL) {
         return 0;
     }
 
-    if (x != 0 && x > (UINT64_MAX - 1) / x) {
+    if (UINT64_MAX - current < disk_total) {
         return 0;
     }
 
-    *result = x * x + 1;
+    *result = current + disk_total;
     return 1;
 }
